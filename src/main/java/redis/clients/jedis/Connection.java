@@ -8,6 +8,9 @@ import java.net.SocketException;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.sohu.tv.jedis.stat.data.UsefulDataCollector;
+import com.sohu.tv.jedis.stat.model.UsefulDataModel;
+
 import redis.clients.jedis.Protocol.Command;
 import redis.clients.jedis.exceptions.JedisConnectionException;
 import redis.clients.jedis.exceptions.JedisDataException;
@@ -29,6 +32,9 @@ public class Connection implements Closeable {
   private int connectionTimeout = Protocol.DEFAULT_TIMEOUT;
   private int soTimeout = Protocol.DEFAULT_TIMEOUT;
   private boolean broken = false;
+  
+  private static ThreadLocal<UsefulDataModel> threadLocal = new ThreadLocal<UsefulDataModel>();
+
 
   public Connection() {
   }
@@ -97,11 +103,17 @@ public class Connection implements Closeable {
 
   protected Connection sendCommand(final Command cmd, final byte[]... args) {
     try {
+      //统计开始
+      UsefulDataModel costModel = UsefulDataModel.getCostModel(threadLocal);
+      costModel.setCommand(cmd.toString().toLowerCase());
+      costModel.setStartTime(System.currentTimeMillis());
+      
       connect();
       Protocol.sendCommand(outputStream, cmd, args);
       pipelinedCommands++;
       return this;
     } catch (JedisConnectionException ex) {
+      UsefulDataCollector.collectException(ex, getHostPort(), System.currentTimeMillis());
       /*
        * When client send request which formed by invalid protocol, Redis send back error message
        * before close connection. We try to read it to provide reason of failure.
@@ -160,6 +172,8 @@ public class Connection implements Closeable {
         outputStream = new RedisOutputStream(socket.getOutputStream());
         inputStream = new RedisInputStream(socket.getInputStream());
       } catch (IOException ex) {
+        UsefulDataCollector.collectException(ex, getHostPort(), System.currentTimeMillis());
+          
         broken = true;
         throw new JedisConnectionException(ex);
       }
@@ -177,6 +191,7 @@ public class Connection implements Closeable {
         outputStream.flush();
         socket.close();
       } catch (IOException ex) {
+        UsefulDataCollector.collectException(ex, getHostPort(), System.currentTimeMillis());
         broken = true;
         throw new JedisConnectionException(ex);
       } finally {
@@ -293,11 +308,37 @@ public class Connection implements Closeable {
   }
 
   protected Object readProtocolWithCheckingBroken() {
-    try {
-      return Protocol.read(inputStream);
-    } catch (JedisConnectionException exc) {
-      broken = true;
-      throw exc;
-    }
+      Object o = null;
+      try {
+          o = Protocol.read(inputStream);
+          return o;
+      } catch (JedisConnectionException exc) {
+          UsefulDataCollector.collectException(exc, getHostPort(), System.currentTimeMillis());
+          broken = true;
+          throw exc;
+      } finally {
+          UsefulDataModel costModel = UsefulDataModel.getCostModel(threadLocal);
+          costModel.setHostPort(getHostPort());
+          costModel.setEndTime(System.currentTimeMillis());
+          // 1.上报command + cost给指定
+          if (o != null) {
+              if (o instanceof byte[]) {
+                  byte[] bytes = (byte[]) o;
+                  // 2.上报字节大小
+                  costModel.setValueBytesLength(bytes.length);
+              }
+          }
+          // 清除threadLocal
+          threadLocal.remove();
+          // 排除掉subscribe问题
+          if (costModel.getCommand() != null) {
+              UsefulDataCollector.collectCostAndValueDistribute(costModel);
+          }
+      }
   }
+  
+  public String getHostPort(){
+      return getHost() + ":" + getPort();
+  }
+
 }

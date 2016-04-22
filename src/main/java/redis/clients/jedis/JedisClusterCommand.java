@@ -1,5 +1,8 @@
 package redis.clients.jedis;
 
+import com.sohu.tv.jedis.stat.data.UsefulDataCollector;
+import com.sohu.tv.jedis.stat.enums.ClientExceptionType;
+
 import redis.clients.jedis.exceptions.JedisAskDataException;
 import redis.clients.jedis.exceptions.JedisClusterException;
 import redis.clients.jedis.exceptions.JedisClusterMaxRedirectionsException;
@@ -94,7 +97,10 @@ public abstract class JedisClusterCommand<T> {
 
   private T runWithRetries(byte[] key, int redirections, boolean tryRandomNode, boolean asking) {
     if (redirections <= 0) {
-      throw new JedisClusterMaxRedirectionsException("Too many Cluster redirections?");
+        JedisClusterMaxRedirectionsException exception = new JedisClusterMaxRedirectionsException("Too many Cluster redirections? key=" + key);
+        //收集
+        UsefulDataCollector.collectException(exception, "", System.currentTimeMillis(), ClientExceptionType.REDIS_CLUSTER);
+        throw exception;
     }
 
     Jedis connection = null;
